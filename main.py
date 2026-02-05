@@ -168,8 +168,8 @@ async def create_polls(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     # Опрос регистрации
     registration_poll = await context.bot.send_poll(
         chat_id=chat_id,
-        question=f"Регистрация на игру в {scheduled_time_str}",
-        options=["+", "-"],
+        question=f"Буду в {scheduled_time_str}",
+        options=["+", "+-", "-"],
         is_anonymous=False,
         allows_multiple_answers=False
     )
