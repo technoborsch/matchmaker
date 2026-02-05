@@ -19,7 +19,6 @@ from telegram.ext import (
 BOT_NAME = "MatchMaker"
 BOT_TAG = "@cs_maps_bot"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_IDS = []  # ID администраторов для служебных команд
 TIMEZONE = pytz.timezone('Europe/Moscow')  # Укажите свою временную зону
 
 # Константы
@@ -89,7 +88,7 @@ ALL_MAPS = [
 # Хранение данных
 active_polls = {}  # chat_id: данные опроса
 map_wins_count = defaultdict(int)  # карта: количество побед
-voting_history = deque(maxlen=5)  # история последних 5 победивших карт
+voting_history = deque(maxlen=10)  # история последних 10 победивших карт
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -313,7 +312,7 @@ async def announce_winner_maps(context: ContextTypes.DEFAULT_TYPE):
         # Формируем сообщение с результатами
         winner_text = "\n".join([f"• {map_name}" for map_name in winners])
         message = (
-            f"🏆 Победившие карты для сегодняшней игры:\n\n"
+            f"🏆В голосовании победили карты:🏆\n\n"
             f"{winner_text}\n\n"
             f"Удачной игры!🎮"
         )
@@ -346,8 +345,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать статус бота и статистику"""
-    if update.effective_user.id not in ADMIN_IDS:
-        return
 
     stats_text = f"🤖 Статус {BOT_NAME}:\n\n"
     stats_text += f"Всего карт в пуле: {len(ALL_MAPS)}\n"
