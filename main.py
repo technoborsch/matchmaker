@@ -1,11 +1,12 @@
 import os
 import logging
 import random
+import pickle
+import atexit
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from typing import List, Tuple
 import pytz
-
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -15,16 +16,79 @@ from telegram.ext import (
     filters
 )
 
-# Конфигурация
+# ==================== КОНФИГУРАЦИЯ ====================
 BOT_NAME = "MatchMaker"
 BOT_TAG = "@cs_maps_bot"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-TIMEZONE = pytz.timezone('Europe/Moscow')  # Укажите свою временную зону
+TIMEZONE = pytz.timezone('Europe/Moscow')
 
 # Константы
 RANDOM_OPTION = "🎲Случайная карта не из этого списка"
 
-# Список карт Counter-Strike
+# Советы
+CS2_PRO_TIPS = [
+    # Очень базовые / очевидные, но важные
+    "Pro tip: всегда покупай броню и шлем, если хватает денег. Без шлема многие смерти — это мгновенный хедшот.",
+    "Pro tip: не стой на месте дольше 3–4 секунд — постоянное движение сильно снижает шансы получить хедшот",
+    "Pro tip: используй голосовую связь или пиши в чат, где враги. Молчаливая команда почти всегда проигрывает.",
+    "Pro tip: не экономь на гранатах в пистолетке — одна удачная флешка может выиграть раунд.",
+    "Pro tip: держи нож в руках, когда бежишь по безопасной зоне — скорость +2%.",
+    "Pro tip: не стреляй на бегу, если это не пистолет или пистолет-пулемет на близкой дистанции.",
+    "Pro tip: перезаряжай оружие только в безопасном месте и когда рядом нет врагов.",
+    "Pro tip: не перезаряжай оружие без надобности. Десяти патронов часто достаточно для дуэли.",
+    "Pro tip: не кидай гранаты вслепую без тренировки — чаще всего они попадут в тебя или в союзников.",
+    "Pro tip: смотри на мини-карту каждые 5–7 секунд — знаешь, где враги - знаешь, куда перемещаться.",
+    "Pro tip: если ты последний в живых — не геройствуй. Играй по времени и заставляй врагов нервничать.",
+
+    # Средний уровень
+    "Pro tip: на T-стороне тайминг важнее агрессии. Лучше прийти на точку на 1 секунду позже, но с гранатами.",
+    "Pro tip: после смерти сразу пиши тиммейтам, сколько врагов видел и где примерно они стояли.",
+    "Pro tip: на CT старайся не играть в одной и той же позиции два раунда подряд — тебя уже выучили.",
+    "Pro tip: учи «shoulder peek» и «jiggle peek» — быстрые выглядывания дают информацию почти без риска.",
+    "Pro tip: на пистолетке Tec-9 / Five-SeveN / CZ75 почти всегда лучше P250 по патронам и урону.",
+    "Pro tip: если тебя пикнули первым — 90% вероятность, что тебя уже ждут. Меняй позицию.",
+    "Pro tip: на AWP стреляй после первого шага остановки, а не на полном ходу.",
+    "Pro tip: всегда проверяй, закрыты ли флешки на твоей позиции перед тем, как выходить.",
+    "Pro tip: не покупай Defuse Kit, если ты играешь агрессивно на T-стороне или на пистолетке.",
+    "Pro tip: на Mirage / Dust2 / Inferno контроль мида часто решает половину игры.",
+
+    # Более продвинутые / ситуационные
+    "Pro tip: учись кидать одну и ту же гранату с одной и той же позиции — постоянство важнее креатива.",
+    "Pro tip: на Overpass и Ancient плохая ротация наказывается мгновенно — думай, кто закроет вторую точку.",
+    "Pro tip: на Vertigo и Nuke вертикальный контроль (крыша / рампа / вентиляция) часто важнее горизонтального.",
+    "Pro tip: right-hand / left-hand (cl_righthand 0/1) иногда спасает на определённых углах — экспериментируй.",
+    "Pro tip: если у тебя стабильно 2–3 килла за матч — подумай о смене прицела или чувствительности.",
+    "Pro tip: на Ancient не забывай про смок на бублик — он закрывает мид и даёт время на ротацию.",
+    "Pro tip: на Inferno банан — это не про киллы, а про контроль тайминга и пространства.",
+    "Pro tip: учись «fake plant / fake defuse» — заставляй врагов нервничать и делать ошибки.",
+    "Pro tip: если тиммейт умер глупо — не ругайся в голосовом. Лучше скажи спокойно, где враг.",
+
+    # Ещё более очевидные, но спасают жизни
+    "Pro tip: не стой спиной к окну / двери / длинному углу, даже если «там никого не может быть».",
+    "Pro tip: делай зум на AWP только когда точно уверен, что будешь стрелять.",
+    "Pro tip: не кидай молотов в союзника, даже если «там враг» — лучше вообще не кидать.",
+    "Pro tip: если у тебя мало HP — не иди в перестрелку. Лучше отойти и дождаться подмоги.",
+    "Pro tip: на eco-раунде не покупай ничего, кроме пистолета и брони, если хочешь выиграть force-buy.",
+    "Pro tip: смотри на радары врагов (kill feed + звук) — знаешь, кто остался и где примерно.",
+    "Pro tip: не бегай с ножом, когда рядом может быть враг — секунда на переключение = смерть.",
+    "Pro tip: если ты услышал шаг — замри на секунду. Часто враг тоже замирает — кто первый выглянет, тот и выиграет."
+]
+
+# 10 разных сообщений о победителях
+WINNER_MESSAGES = [
+    "🏆 В голосовании победили карты: 🏆\n\n{winner_text}\n\n{random_tip}",
+    "🔥 Выбраны карты на катку! 🔥\n\n{winner_text}\n\n{random_tip}",
+    "🎉 Итоги голосования: 🎉\n\n{winner_text}\n\n{random_tip}",
+    "🏅 Победившие карты определены: 🏅\n\n{winner_text}\n\n{random_tip}",
+    "🗺️ Карты на ближайшую игру: 🗺️\n\n{winner_text}\n\n{random_tip}",
+    "📢 Голосование закрыто. Выбрано:\n\n{winner_text}\n\n{random_tip}",
+    "💣 Бомба будет на:\n\n{winner_text}\n\n{random_tip}",
+    "🌟 Самые популярные карты по голосам: 🌟\n\n{winner_text}\n\n{random_tip}",
+    "🎲 Голоса + рандом = результат:\n\n{winner_text}\n\n{random_tip}",
+    "🏆 Несмотря на здравый смысл, победили карты: 🏆\n\n{winner_text}\n\n{random_tip}",
+]
+
+# ==================== СПИСОК КАРТ ====================
 ALL_MAPS = [
     "🏢Agency - Офисное здание с современным дизайном",
     "🌴🗿Ancient - Археологические раскопки в джунглях с ацтекскими руинами",
@@ -57,7 +121,7 @@ ALL_MAPS = [
     "🏛️Mansion - Большой классический особняк с садом",
     "🏰Marble - Большой каменный замок",
     "💒Memento - Свадьба в замке у моря с непробиваемым тортом",
-    "🎖️Militia - Усадьба в лесу с тренировочной базой",
+    "🎖️Militia - Спасение заложников на ферме",
     "🇳🇱Mills - Городок в Голландии с ветряными мельницами",
     "⛏️Minecraft - Карта, вдохновлённая стилем игры Minecraft",
     "🕌Mirage - Пустынный город с центральным двором и каналами",
@@ -85,10 +149,11 @@ ALL_MAPS = [
     "🚉Whistle - Маленькая карта на железнодорожной станции"
 ]
 
-# Хранение данных
-active_polls = {}  # chat_id: данные опроса
-map_wins_count = defaultdict(int)  # карта: количество побед
-voting_history = deque(maxlen=10)  # история последних 10 победивших карт
+# ==================== ХРАНЕНИЕ ДАННЫХ ====================
+active_polls = {}  # chat_id → данные опроса
+map_wins_count = defaultdict(int)  # карта → количество побед
+voting_history = deque(maxlen=10)  # последние 10 победивших карт (для отображения)
+cooldowns = defaultdict(int)  # карта → оставшиеся голосования в КД
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -97,76 +162,101 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def get_available_maps(exclude_list: List[str] = None) -> List[str]:
-    """Получить список доступных карт (не в кд)"""
     if exclude_list is None:
         exclude_list = []
-
-    available = []
-    for map_name in ALL_MAPS:
-        if map_name not in voting_history and map_name not in exclude_list:
-            available.append(map_name)
-
-    # Если все карты в кд, возвращаем все кроме тех что в exclude_list
+    available = [m for m in ALL_MAPS if m not in exclude_list and cooldowns.get(m, 0) <= 0]
     if not available:
-        available = [map_name for map_name in ALL_MAPS if map_name not in exclude_list]
-
+        available = [m for m in ALL_MAPS if m not in exclude_list]
     return available
 
 
 def select_map_options() -> List[str]:
-    """Выбрать 11 случайных карт из доступных и добавить опцию случайной карты"""
-    available_maps = get_available_maps()
-
-    # Выбираем 11 случайных карт, если доступно столько
-    selected_maps = random.sample(available_maps, min(11, len(available_maps)))
-
-    # Добавляем опцию случайной карты
-    selected_maps.append(RANDOM_OPTION)
-
-    return selected_maps
+    available = get_available_maps()
+    selected = random.sample(available, min(11, len(available)))
+    selected.append(RANDOM_OPTION)
+    return selected
 
 
 def get_random_map_not_in_list(exclude_list: List[str]) -> str:
-    """Получить случайную карту, которой нет в exclude_list и не в кд"""
-    # Исключаем RANDOM_OPTION из списка
-    exclude_list = [item for item in exclude_list if item != RANDOM_OPTION]
-
-    available_maps = get_available_maps(exclude_list)
-
-    if not available_maps:
-        # Если нет доступных карт, возвращаем случайную из всех (кроме исключённых)
-        all_maps_excluded = [map_name for map_name in ALL_MAPS if map_name not in exclude_list]
-        if all_maps_excluded:
-            return random.choice(all_maps_excluded)
-        else:
-            # Если все карты исключены, возвращаем первую из ALL_MAPS
-            return ALL_MAPS[0]
-
-    return random.choice(available_maps)
+    exclude = [item for item in exclude_list if item != RANDOM_OPTION]
+    available = get_available_maps(exclude)
+    if not available:
+        candidates = [m for m in ALL_MAPS if m not in exclude]
+        return random.choice(candidates) if candidates else ALL_MAPS[0]
+    return random.choice(available)
 
 
-async def schedule_map_announcement(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
-                                    scheduled_time: datetime, num_maps: int):
-    """Запланировать публикацию результатов за 5 минут до времени"""
-    announcement_time = scheduled_time - timedelta(minutes=5)
-    current_time = datetime.now(TIMEZONE)
+# ==================== ПЕРСИСТЕНТНОСТЬ ====================
+STATE_FILE = 'bot_state.pkl'
 
-    if announcement_time > current_time:
-        delay = (announcement_time - current_time).total_seconds()
-        context.job_queue.run_once(
-            announce_winner_maps,
-            delay,
-            chat_id=chat_id,
-            data={'num_maps': num_maps, 'poll_data': active_polls.get(chat_id)}
-        )
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        logger.info("Файл состояния не найден, начинаем с чистого листа")
+        return
+    try:
+        with open(STATE_FILE, 'rb') as f:
+            data = pickle.load(f)
+        map_wins_count.update(data.get('map_wins_count', {}))
+        voting_history.extend(data.get('voting_history', []))
+        cooldowns.update(data.get('cooldowns', {}))
+        active_polls.update(data.get('active_polls', {}))
+        logger.info(f"Состояние загружено из {STATE_FILE}")
+    except Exception as e:
+        logger.warning(f"Ошибка при загрузке состояния: {e}")
+
+
+def save_state():
+    state = {
+        'map_wins_count': dict(map_wins_count),
+        'voting_history': list(voting_history),
+        'cooldowns': dict(cooldowns),
+        'active_polls': active_polls.copy(),
+    }
+    try:
+        with open(STATE_FILE, 'wb') as f:
+            pickle.dump(state, f)
+        logger.info(f"Состояние сохранено в {STATE_FILE}")
+    except Exception as e:
+        logger.error(f"Не удалось сохранить состояние: {e}")
+
+
+# ==================== ЛОГИКА ГОЛОСОВАНИЙ ====================
+async def schedule_map_announcement(
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        scheduled_time: datetime,
+        num_maps: int
+):
+    now = datetime.now(TIMEZONE)
+    time_left_seconds = (scheduled_time - now).total_seconds()
+
+    if time_left_seconds <= 0:
+        delay = 0
+    elif time_left_seconds <= 300:
+        delay = time_left_seconds
+    else:
+        announcement_time = scheduled_time - timedelta(minutes=5)
+        delay = (announcement_time - now).total_seconds()
+
+    delay = max(0, delay)
+
+    context.job_queue.run_once(
+        announce_winner_maps,
+        delay,
+        chat_id=chat_id,
+        data={
+            'num_maps': num_maps,
+            'poll_data': active_polls.get(chat_id)
+        }
+    )
 
 
 async def create_polls(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
                        num_maps: int, scheduled_time_str: str) -> Tuple[int, int]:
-    """Создать два опроса и вернуть их message_id"""
-    # Опрос регистрации
-    registration_poll = await context.bot.send_poll(
+    reg_poll = await context.bot.send_poll(
         chat_id=chat_id,
         question=f"Буду в {scheduled_time_str}",
         options=["+", "+-", "-"],
@@ -174,7 +264,6 @@ async def create_polls(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         allows_multiple_answers=False
     )
 
-    # Опрос выбора карт
     map_options = select_map_options()
     map_poll = await context.bot.send_poll(
         chat_id=chat_id,
@@ -184,63 +273,51 @@ async def create_polls(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         allows_multiple_answers=True
     )
 
-    return registration_poll.message_id, map_poll.message_id
+    return reg_poll.message_id, map_poll.message_id
 
 
 async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик упоминания бота в группе"""
     if not update.message or not update.message.text:
         return
 
-    # Проверяем, что сообщение содержит упоминание бота
-    if not context.bot.username or f"@{context.bot.username}" not in update.message.text:
+    text = update.message.text.replace(f"@{context.bot.username}", "").strip()
+    if not text:
         return
 
-    # Извлекаем команду после упоминания
-    text = update.message.text.replace(f"@{context.bot.username}", "").strip()
-
     try:
-        # Парсим время и количество карт
         time_str, num_maps_str = text.split()
-
-        # Проверяем формат времени
         scheduled_time = datetime.strptime(time_str, "%H:%M").time()
-
-        # Проверяем количество карт
         num_maps = int(num_maps_str)
+
         if num_maps < 1 or num_maps > 12:
             await update.message.reply_text("Количество карт должно быть от 1 до 12")
             return
 
-        # Создаем дату с учетом сегодняшнего дня
         current_date = datetime.now(TIMEZONE).date()
         scheduled_datetime = datetime.combine(current_date, scheduled_time)
         scheduled_datetime = TIMEZONE.localize(scheduled_datetime)
 
-        # Проверяем, что время в будущем
         if scheduled_datetime <= datetime.now(TIMEZONE):
             await update.message.reply_text("Укажите время в будущем!")
             return
 
-        # Создаем опросы
-        reg_poll_id, map_poll_id = await create_polls(
+        reg_id, map_id = await create_polls(
             update.message.chat_id,
             context,
             num_maps,
             time_str
         )
 
-        # Сохраняем информацию об активном опросе
         map_options = select_map_options()
+
         active_polls[update.message.chat_id] = {
-            'registration_poll_id': reg_poll_id,
-            'map_poll_id': map_poll_id,
+            'registration_poll_id': reg_id,
+            'map_poll_id': map_id,
             'scheduled_time': scheduled_datetime,
             'num_maps': num_maps,
-            'map_options': map_options[:-1]  # Сохраняем без RANDOM_OPTION
+            'map_options': map_options[:-1]  # без RANDOM_OPTION
         }
 
-        # Планируем объявление результатов
         await schedule_map_announcement(
             context,
             update.message.chat_id,
@@ -248,159 +325,167 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
             num_maps
         )
 
-    except ValueError as e:
+    except ValueError:
         await update.message.reply_text(
-            "Неверный формат команды. Используйте:\n"
-            f"{BOT_TAG} HH:MM количество_карт\n"
+            f"Формат: {BOT_TAG} ЧЧ:ММ количество\n"
             f"Пример: {BOT_TAG} 16:00 2"
         )
     except Exception as e:
-        logger.error(f"Error creating polls: {e}")
-        await update.message.reply_text("Произошла ошибка при создании опросов")
+        logger.error(f"Ошибка при создании голосования: {e}")
+        await update.message.reply_text("Произошла ошибка 😔")
 
 
 async def announce_winner_maps(context: ContextTypes.DEFAULT_TYPE):
-    """Объявить победившие карты"""
     job = context.job
     chat_id = job.chat_id
     num_maps = job.data['num_maps']
-    poll_data = job.data['poll_data']
+    poll_data = job.data.get('poll_data')
 
     if not poll_data or chat_id not in active_polls:
         return
 
     try:
-        # Получаем результаты опроса карт
-        map_poll = await context.bot.stop_poll(
-            chat_id,
-            poll_data['map_poll_id']
-        )
+        map_poll = await context.bot.stop_poll(chat_id, poll_data['map_poll_id'])
 
-        # Сортируем карты по количеству голосов
-        map_votes = [
-            (option.text, option.voter_count)
-            for option in map_poll.options
-        ]
+        votes = [(opt.text, opt.voter_count) for opt in map_poll.options]
+        votes.sort(key=lambda x: (-x[1], map_wins_count.get(x[0], 0)))
 
-        # Сортируем: сначала по голосам (убывание), потом по количеству побед (возрастание)
-        map_votes.sort(key=lambda x: (-x[1], map_wins_count.get(x[0], 0)))
-
-        # Выбираем победителей
         winners = []
-        polled_maps = [option.text for option in map_poll.options if option.text != RANDOM_OPTION]
+        polled_maps = [opt.text for opt in map_poll.options if opt.text != RANDOM_OPTION]
 
-        for map_name, _ in map_votes:
+        for map_name, _ in votes:
             if len(winners) >= num_maps:
                 break
-
             if map_name == RANDOM_OPTION:
-                # Выбираем случайную карту, которой нет в опросе и не в кд
-                random_map = get_random_map_not_in_list(polled_maps)
-                winners.append(random_map)
-                # Добавляем выбранную случайную карту в список, чтобы не выбирать её снова
-                polled_maps.append(random_map)
+                rand_map = get_random_map_not_in_list(polled_maps)
+                winners.append(rand_map)
+                polled_maps.append(rand_map)
             elif map_name not in winners:
                 winners.append(map_name)
 
         # Обновляем статистику
-        for winner in winners:
-            map_wins_count[winner] += 1
-
-        # Добавляем в историю для кд
+        for w in winners:
+            map_wins_count[w] += 1
         voting_history.extend(winners)
 
-        # Формируем сообщение с результатами
-        winner_text = "\n".join([f"• {map_name}" for map_name in winners])
-        message = (
-            f"🏆В голосовании победили карты:🏆\n\n"
-            f"{winner_text}\n\n"
-            f"Удачной игры!🎮"
+        # Кулдаун — 5 следующих голосований
+        for m in list(cooldowns):
+            cooldowns[m] -= 1
+            if cooldowns[m] <= 0:
+                del cooldowns[m]
+        for w in winners:
+            cooldowns[w] = 5
+
+        # Сообщение
+        winner_text = "\n".join(f"• {m}" for m in winners)
+
+        # Выбираем случайное сообщение и случайный совет
+        template = random.choice(WINNER_MESSAGES)
+        tip = random.choice(CS2_PRO_TIPS)
+
+        message = template.format(
+            winner_text=winner_text,
+            random_tip=tip
         )
 
         await context.bot.send_message(chat_id=chat_id, text=message)
 
-        # Удаляем информацию об опросе
         if chat_id in active_polls:
             del active_polls[chat_id]
 
     except Exception as e:
-        logger.error(f"Error announcing winners: {e}")
+        logger.error(f"Ошибка при объявлении результатов: {e}")
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Произошла ошибка при подсчете результатов"
+            text="Не удалось подвести итоги голосования 😢"
         )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    await update.message.reply_text(
-        f"Привет! Я {BOT_NAME} - бот для организации голосований за карты в CS.\n\n"
-        "Чтобы начать голосование, упомяните меня в группе с командой:\n"
-        f"{BOT_TAG} HH:MM количество_карт\n\n"
-        f"Пример: {BOT_TAG} 16:00 2\n\n"
-        "В голосовании за карты всегда доступна опция '🎲 Случайная карта не из этого списка' "
-        "для выбора случайной карты, которой нет в предложенных вариантах.\n\n"
-        "Команда /list выведет текущий набор карт в пуле\n"
-        "Команда /status покажет статус бота: количество карт в пуле, число активных голосований, "
-        "последние победившие карты и самые популярные карты"
+    text = (
+        f"Привет! Я {BOT_NAME} — помогаю выбирать карты для каток в CS.\n\n"
+        f"Запуск голосования:\n"
+        f"{BOT_TAG} ЧЧ:ММ количество_карт\n"
+        f"Пример: {BOT_TAG} 20:15 2\n\n"
+        "В опросе всегда есть опция «Случайная карта не из списка».\n"
+        "Доступные команды:\n"
+        "/status — статистика и кулдауны\n"
+        "/list — полный список карт"
     )
+    await update.message.reply_text(text)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать статус бота и статистику"""
-
-    stats_text = f"🤖 Статус {BOT_NAME}:\n\n"
-    stats_text += f"Всего карт в пуле: {len(ALL_MAPS)}\n"
-    stats_text += f"Карт в кд: {len(voting_history)}\n"
-    stats_text += f"Активных голосований: {len(active_polls)}\n\n"
+    lines = [f"🤖 {BOT_NAME} статус:\n"]
+    lines.append(f"Всего карт в пуле: {len(ALL_MAPS)}")
+    lines.append(f"Карт в кулдауне: {len(cooldowns)}")
+    lines.append(f"Активных голосований: {len(active_polls)}\n")
 
     if voting_history:
-        stats_text += "Последние победившие карты:\n"
-        for i, map_name in enumerate(voting_history, 1):
-            stats_text += f"{i}. {map_name}\n"
-        stats_text += "\n"
+        lines.append("Последние победители:")
+        for i, m in enumerate(voting_history, 1):
+            lines.append(f"{i}. {m}")
+        lines.append("")
 
     if map_wins_count:
-        stats_text += "Топ побед карт:\n"
-        sorted_wins = sorted(map_wins_count.items(), key=lambda x: -x[1])[:10]
-        for i, (map_name, wins) in enumerate(sorted_wins, 1):
-            # Укорачиваем длинные названия для лучшей читаемости
-            display_name = map_name.split(' - ')[0] if ' - ' in map_name else map_name[:20]
-            stats_text += f"{i}. {display_name}: {wins} побед\n"
+        lines.append("Топ по победам:")
+        top = sorted(map_wins_count.items(), key=lambda x: -x[1])[:10]
+        for i, (m, cnt) in enumerate(top, 1):
+            short = m.split(" - ")[0] if " - " in m else m[:25]
+            lines.append(f"{i}. {short}: {cnt}")
 
-    await update.message.reply_text(stats_text)
+    await update.message.reply_text("\n".join(lines))
 
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список всех карт"""
-    maps_text = f"🗺️ Всего карт: {len(ALL_MAPS)}\n\n"
-
-    # Разбиваем на группы по 10 для лучшей читаемости
-    for i, map_name in enumerate(ALL_MAPS, 1):
-        maps_text += f"{i}. {map_name}\n"
-
-        # Добавляем разделитель каждые 10 карт
-        if i % 10 == 0 and i != len(ALL_MAPS):
-            maps_text += "\n"
-
-    await update.message.reply_text(maps_text)
+    text = f"🗺️ Всего карт: {len(ALL_MAPS)}\n\n"
+    for i, m in enumerate(ALL_MAPS, 1):
+        text += f"{i}. {m}\n"
+        if i % 10 == 0 and i < len(ALL_MAPS):
+            text += "\n"
+    await update.message.reply_text(text)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
-    logger.error(f"Exception while handling an update: {context.error}")
-
+    logger.error(f"Ошибка в обработчике: {context.error}")
     if update and update.effective_chat:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Произошла ошибка при обработке команды"
+            text="Произошла внутренняя ошибка бота"
         )
 
 
+# ==================== ЗАПУСК ====================
 def main():
-    """Запуск бота"""
-    # Создаем приложение
+    load_state()
+
     application = Application.builder().token(BOT_TOKEN).build()
+
+    # Восстановление отложенных задач после перезапуска
+    now = datetime.now(TIMEZONE)
+    for chat_id, data in list(active_polls.items()):
+        sched_time = data.get('scheduled_time')
+        if not sched_time or sched_time <= now:
+            del active_polls[chat_id]
+            continue
+
+        # Планируем заново с учётом текущего времени
+        application.job_queue.run_once(
+            announce_winner_maps,
+            when=0,  # будет пересчитано внутри schedule_map_announcement
+            chat_id=chat_id,
+            data={'num_maps': data['num_maps'], 'poll_data': data}
+        )
+        # Лучше вызвать напрямую schedule_map_announcement
+        context = application.create_task_context()
+        application.create_task(
+            schedule_map_announcement(
+                context,
+                chat_id,
+                sched_time,
+                data['num_maps']
+            )
+        )
 
     # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start_command))
@@ -410,11 +495,10 @@ def main():
         filters.TEXT & filters.Entity("mention"),
         handle_mention
     ))
-
-    # Регистрируем обработчик ошибок
     application.add_error_handler(error_handler)
 
-    # Запускаем бота
+    atexit.register(save_state)
+
     print(f"{BOT_NAME} запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
