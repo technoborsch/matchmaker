@@ -153,7 +153,8 @@ ALL_MAPS = [
 active_polls = {}  # chat_id → данные опроса
 map_wins_count = defaultdict(int)  # карта → количество побед
 voting_history = deque(maxlen=10)  # последние 10 победивших карт (для отображения)
-cooldowns = defaultdict(int)  # карта → оставшиеся голосования в КД
+
+recent_winner_groups = deque(maxlen=5)  # каждый элемент = tuple победителей одного голосования
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -164,11 +165,22 @@ logger = logging.getLogger(__name__)
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def get_available_maps(exclude_list: List[str] = None) -> List[str]:
+    """Возвращает карты, которые НЕ участвовали в последних 5 голосованиях"""
     if exclude_list is None:
         exclude_list = []
-    available = [m for m in ALL_MAPS if m not in exclude_list and cooldowns.get(m, 0) <= 0]
+
+    # Собираем все карты из последних 5 результатов
+    forbidden = set()
+    for group in recent_winner_groups:
+        forbidden.update(group)
+
+    available = [m for m in ALL_MAPS
+                 if m not in exclude_list and m not in forbidden]
+
+    # Если вдруг ничего не осталось — возвращаем всё (защита от полного КД)
     if not available:
         available = [m for m in ALL_MAPS if m not in exclude_list]
+
     return available
 
 
@@ -199,11 +211,14 @@ def load_state():
     try:
         with open(STATE_FILE, 'rb') as f:
             data = pickle.load(f)
+
         map_wins_count.update(data.get('map_wins_count', {}))
         voting_history.extend(data.get('voting_history', []))
-        cooldowns.update(data.get('cooldowns', {}))
+        recent_winner_groups.clear()
+        recent_winner_groups.extend(data.get('recent_winner_groups', []))
         active_polls.update(data.get('active_polls', {}))
-        logger.info(f"Состояние загружено из {STATE_FILE}")
+
+        logger.info(f"Состояние загружено: {len(recent_winner_groups)} групп в КД")
     except Exception as e:
         logger.warning(f"Ошибка при загрузке состояния: {e}")
 
@@ -212,7 +227,7 @@ def save_state():
     state = {
         'map_wins_count': dict(map_wins_count),
         'voting_history': list(voting_history),
-        'cooldowns': dict(cooldowns),
+        'recent_winner_groups': list(recent_winner_groups),  # ← сохраняем FIFO-группы
         'active_polls': active_polls.copy(),
     }
     try:
@@ -315,7 +330,7 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'map_poll_id': map_id,
             'scheduled_time': scheduled_datetime,
             'num_maps': num_maps,
-            'map_options': map_options[:-1]  # без RANDOM_OPTION
+            'map_options': map_options[:-1]
         }
 
         await schedule_map_announcement(
@@ -368,18 +383,12 @@ async def announce_winner_maps(context: ContextTypes.DEFAULT_TYPE):
             map_wins_count[w] += 1
         voting_history.extend(winners)
 
-        # Кулдаун — 5 следующих голосований
-        for m in list(cooldowns):
-            cooldowns[m] -= 1
-            if cooldowns[m] <= 0:
-                del cooldowns[m]
-        for w in winners:
-            cooldowns[w] = 5
+        # === НОВАЯ ЛОГИКА КД: выталкиваем самый старый результат ===
+        recent_winner_groups.append(tuple(winners))  # автоматически выталкивает старый (maxlen=5)
 
-        # Сообщение
+        # Сообщение пользователю
         winner_text = "\n".join(f"• {m}" for m in winners)
 
-        # Выбираем случайное сообщение и случайный совет
         template = random.choice(WINNER_MESSAGES)
         tip = random.choice(CS2_PRO_TIPS)
 
@@ -392,6 +401,13 @@ async def announce_winner_maps(context: ContextTypes.DEFAULT_TYPE):
 
         if chat_id in active_polls:
             del active_polls[chat_id]
+
+        # === СОХРАНЕНИЕ СОСТОЯНИЯ СРАЗУ ПОСЛЕ РЕЗУЛЬТАТА ===
+        try:
+            save_state()
+            logger.info(f"State saved after poll result in chat {chat_id}")
+        except Exception as save_err:
+            logger.error(f"Failed to save state after poll: {save_err}")
 
     except Exception as e:
         logger.error(f"Ошибка при объявлении результатов: {e}")
@@ -409,7 +425,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Пример: {BOT_TAG} 20:15 2\n\n"
         "В опросе всегда есть опция «Случайная карта не из списка».\n"
         "Доступные команды:\n"
-        "/status — статистика и кулдауны\n"
+        "/status — статистика и КД\n"
         "/list — полный список карт"
     )
     await update.message.reply_text(text)
@@ -418,8 +434,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🤖 {BOT_NAME} статус:\n"]
     lines.append(f"Всего карт в пуле: {len(ALL_MAPS)}")
-    lines.append(f"Карт в кулдауне: {len(cooldowns)}")
-    lines.append(f"Активных голосований: {len(active_polls)}\n")
+    lines.append(f"Результатов в КД: {len(recent_winner_groups)} / 5\n")
 
     if voting_history:
         lines.append("Последние победители:")
@@ -433,6 +448,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, (m, cnt) in enumerate(top, 1):
             short = m.split(" - ")[0] if " - " in m else m[:25]
             lines.append(f"{i}. {short}: {cnt}")
+
+    # Показываем текущий КД
+    if recent_winner_groups:
+        lines.append("\n📛 Карты в КД (последние 5 результатов):")
+        for i, group in enumerate(recent_winner_groups, 1):
+            short_group = [m.split(" - ")[0] for m in group]
+            lines.append(f"{i}. {', '.join(short_group)}")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -461,7 +483,7 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Восстановление отложенных задач после перезапуска
+    # Восстановление отложенных задач
     now = datetime.now(TIMEZONE)
     for chat_id, data in list(active_polls.items()):
         sched_time = data.get('scheduled_time')
@@ -469,18 +491,9 @@ def main():
             del active_polls[chat_id]
             continue
 
-        # Планируем заново с учётом текущего времени
-        application.job_queue.run_once(
-            announce_winner_maps,
-            when=0,  # будет пересчитано внутри schedule_map_announcement
-            chat_id=chat_id,
-            data={'num_maps': data['num_maps'], 'poll_data': data}
-        )
-        # Лучше вызвать напрямую schedule_map_announcement
-        context = application.create_task_context()
         application.create_task(
             schedule_map_announcement(
-                context,
+                application.create_task_context(),
                 chat_id,
                 sched_time,
                 data['num_maps']
